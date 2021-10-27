@@ -416,12 +416,14 @@ countlink$treatment_best_response <- as.factor(countlink$treatment_best_response
 #--------------------------------------------------------------
 
 
+
 # Data partiton -----------------------------------
 
 library(caret)
 str(countlink)
 head(countlink[, 1:10])
 set.seed(1404)
+levels(countlink$treatment_best_response) <- c("noresponse","response")
 trainRowNumbers <- createDataPartition(countlink$treatment_best_response, p=0.7, list=FALSE) # try 3070 and 4060
 trainData <- countlink[trainRowNumbers,]
 testData <- countlink[-trainRowNumbers,]
@@ -432,30 +434,29 @@ testData <- countlink[-trainRowNumbers,]
 set.seed(1404)
 
 imbal_train <- as.data.frame(trainData)
+ORIG <- imbal_train
 imbal_test  <- as.data.frame(testData)
 table(imbal_train$treatment_best_response)
 
 set.seed(1404)
-down_train <- downSample(x = imbal_train[, -ncol(imbal_train)],
+DOWN <- downSample(x = imbal_train[, -ncol(imbal_train)],
                          y = imbal_train$treatment_best_response)
-table(down_train$Class)   
+colnames(DOWN)[ncol(DOWN)] <- 'treatment_best_response'
+table(DOWN$treatment_best_response)   
 
 set.seed(1404)
-up_train <- upSample(x = imbal_train[, -ncol(imbal_train)],
-                     y = imbal_train$treatment_best_response)                         
-table(up_train$Class) 
+UP <- upSample(x = imbal_train[, -ncol(imbal_train)],
+                     y = imbal_train$treatment_best_response)
+colnames(UP)[ncol(UP)] <- 'treatment_best_response'                         
+table(UP$treatment_best_response) 
 
-library(DMwR)
-
-set.seed(1404)
-smote_train <- SMOTE(treatment_best_response ~ ., data  = imbal_train)                         
-table(smote_train$treatment_best_response) 
 
 library(ROSE)
 
 set.seed(1404)
-rose_train <- ROSE(treatment_best_response ~ ., data  = imbal_train)$data                         
-table(rose_train$treatment_best_response) 
+ROSE <- ROSE(treatment_best_response ~ ., data  = imbal_train)$data   
+levels(ROSE$treatment_best_response) <- c("noresponse","response")                  
+table(ROSE$treatment_best_response) 
 
 #For these data, we’ll use a bagged classification and estimate the area under the ROC curve using five repeats of 10-fold CV.
 
@@ -463,263 +464,220 @@ ctrl <- trainControl(method = "repeatedcv", repeats = 5,
                      classProbs = TRUE,
                      summaryFunction = twoClassSummary)
 
-
+sampling <- list('ORIG','DOWN','UP')
+# sampling <- list('ORIG','DOWN','UP','ROSE')
+x= 'DOWN'
+test_acc <- function(model) {
+  con <- confusionMatrix(predict(model,imbal_test),imbal_test$treatment_best_response)
+  con$table
+  con$byClass[1:2]
+}
+test_acct <- function(model) {
+  con <- confusionMatrix(predict(model,imbal_train),imbal_train$treatment_best_response)
+  con$table
+  con$byClass[1:2]
+}
+allmodels <- data.frame(model="a",sens=0,spec=0)
+allmodels <- allmodels[allmodels$model==0,]
 #--------------------------------
 
-set.seed(1404)
-orig_fit <- train(treatment_best_response ~ ., data = imbal_train, 
-                  method = "treebag",
-                  nbagg = 50,
-                  metric = "ROC",
-                  trControl = ctrl)
-
-set.seed(1404)
-down_outside <- train(Class ~ ., data = down_train, 
-                      method = "treebag",
-                      nbagg = 50,
-                      metric = "ROC",
-                      trControl = ctrl)
-
-set.seed(1404)
-up_outside <- train(Class ~ ., data = up_train, 
+models <- list()
+fun <- function(x) {
+  set.seed(1404)
+  model <- train(treatment_best_response ~ ., data = get(x), 
                     method = "treebag",
                     nbagg = 50,
                     metric = "ROC",
                     trControl = ctrl)
+  model <- list(model)
+  names(model) <- x
+  models <<- c(models,model)
+}
+lapply(sampling,fun)
+models_test <- lapply(models, test_acc)
+models_test <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acc), as.vector)))
+models_testt <- lapply(models, test_acct)
+models_testt <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acct), as.vector)))
+colnames(models_testt) <- c("V3","V4")
+setDT(models_test, keep.rownames = TRUE)[]
+setDT(models_testt, keep.rownames = TRUE)[]
+models_test <- merge(models_test,models_testt,by.x="rn",by.y="rn")
+models_test$rn <- paste('treebag_',models_test$rn,sep='') 
 
-set.seed(1404)
-rose_outside <- train(treatment_best_response ~ ., data = rose_train, 
-                      method = "treebag",
-                      nbagg = 50,
-                      metric = "ROC",
-                      trControl = ctrl)
-
-
-set.seed(1404)
-smote_outside <- train(treatment_best_response ~ ., data = smote_train, 
-                       method = "treebag",
-                       nbagg = 50,
-                       metric = "ROC",
-                       trControl = ctrl)
-
-outside_models <- list(original = orig_fit,
-                       down = down_outside,
-                       up = up_outside,
-                       SMOTE = smote_outside,
-                       ROSE = rose_outside)
-
-outside_resampling <- resamples(outside_models)
-
-test_roc <- function(model, data) {
-  library(pROC)
-  roc_obj <- roc(data$treatment_best_response, 
-                 predict(model, data, type = "prob")[, "noresponse"],
-                 levels = c("response", "noresponse"))
-  ci(roc_obj)
-  }
-
-outside_test <- lapply(outside_models, test_roc, data = imbal_test)
-outside_test <- lapply(outside_test, as.vector)
-outside_test <- do.call("rbind", outside_test)
-colnames(outside_test) <- c("lower", "ROC", "upper")
-outside_test <- as.data.frame(outside_test)
-
-summary(outside_resampling, metric = "ROC")
-
-outside_test
-
-table <- data.frame(treebag= outside_test$ROC)
-row.names(table) <- row.names(outside_test)
+allmodels <- rbind(models_test,data.frame(model=models_test$rn,sens_ts=models_test$V1,spec_ts=models_test$V2,sens_tr=models_test$V3,spec_tr=models_test$V4))
 
 #-------------------------------- rf
 
-
-
-set.seed(1404)
-orig_fit <- train(treatment_best_response ~ ., data = imbal_train, 
+models <- list()
+fun <- function(x) {
+  set.seed(1404)
+  model <- train(treatment_best_response ~ ., data = get(x), 
                   method = "earth",
-		            tuneGrid = data.frame(degree = 2, nprune = 5),
-		            trControl = ctrl)
+                tuneGrid = data.frame(degree = 2, nprune = 5),
+                trControl = ctrl)
+  model <- list(model)
+  names(model) <- x
+  models <<- c(models,model)
+}
+lapply(sampling,fun)
+models_test <- lapply(models, test_acc)
+models_test <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acc), as.vector)))
+models_testt <- lapply(models, test_acct)
+models_testt <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acct), as.vector)))
+colnames(models_testt) <- c("V3","V4")
+setDT(models_test, keep.rownames = TRUE)[]
+setDT(models_testt, keep.rownames = TRUE)[]
+models_test <- merge(models_test,models_testt,by.x="rn",by.y="rn")
+models_test$rn <- paste('earth_',models_test$rn,sep='') 
 
-set.seed(1404)
-down_outside <- train(Class ~ ., data = down_train, 
-                      method = "earth",
-		            tuneGrid = data.frame(degree = 2, nprune = 5),
-		            trControl = ctrl)
-
-set.seed(1404)
-up_outside <- train(Class ~ ., data = up_train, 
-                    method = "earth",
-		            tuneGrid = data.frame(degree = 2, nprune = 5),
-		            trControl = ctrl)
-
-set.seed(1404)
-rose_outside <- train(treatment_best_response ~ ., data = rose_train, 
-                      method = "earth",
-		            tuneGrid = data.frame(degree = 2, nprune = 5),
-		            trControl = ctrl)
-
-
-set.seed(1404)
-smote_outside <- train(treatment_best_response ~ ., data = smote_train, 
-                       method = "earth",
-		            tuneGrid = data.frame(degree = 2, nprune = 5),
-		            trControl = ctrl)
-
-outside_models <- list(original = orig_fit,
-                       down = down_outside,
-                       up = up_outside,
-                       SMOTE = smote_outside,
-                       ROSE = rose_outside)
-
-outside_resampling <- resamples(outside_models)
-
-test_roc <- function(model, data) {
-  library(pROC)
-  roc_obj <- roc(data$treatment_best_response, 
-                 predict(model, data, type = "prob")[, "noresponse"],
-                 levels = c("response", "noresponse"))
-  ci(roc_obj)
-  }
-
-outside_test <- lapply(outside_models, test_roc, data = imbal_test)
-outside_test <- lapply(outside_test, as.vector)
-outside_test <- do.call("rbind", outside_test)
-colnames(outside_test) <- c("lower", "ROC", "upper")
-outside_test <- as.data.frame(outside_test)
-
-summary(outside_resampling, metric = "ROC")
-
-outside_test
-
-table$earth <- outside_test$ROC
-
+allmodels <- rbind(allmodels,data.frame(model=models_test$rn,sens_ts=models_test$V1,spec_ts=models_test$V2,sens_tr=models_test$V3,spec_tr=models_test$V4))
 
 #-----------------------------------
 
 
-
-
-set.seed(1404)
-orig_fit <- train(treatment_best_response ~ ., data = imbal_train, 
+models <- list()
+fun <- function(x) {
+  set.seed(1404)
+  model <- train(treatment_best_response ~ ., data = get(x), 
                method = "rf",
-		                metric = "ROC",
-		                trControl = ctrl)
-set.seed(1404)
-down_outside <- train(Class ~ ., data = down_train, 
-               method = "rf",
-		                metric = "ROC",
-		                trControl = ctrl)
+                    metric = "ROC",
+                    trControl = ctrl)
+  model <- list(model)
+  names(model) <- x
+  models <<- c(models,model)
+}
+lapply(sampling,fun)
+models_test <- lapply(models, test_acc)
+models_test <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acc), as.vector)))
+models_testt <- lapply(models, test_acct)
+models_testt <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acct), as.vector)))
+colnames(models_testt) <- c("V3","V4")
+setDT(models_test, keep.rownames = TRUE)[]
+setDT(models_testt, keep.rownames = TRUE)[]
+models_test <- merge(models_test,models_testt,by.x="rn",by.y="rn")
+models_test$rn <- paste('rf_',models_test$rn,sep='') 
 
-set.seed(1404)
-up_outside <- train(Class ~ ., data = up_train, 
-              method = "rf",
-		                metric = "ROC",
-		                trControl = ctrl)
-
-set.seed(1404)
-rose_outside <- train(treatment_best_response ~ ., data = rose_train, 
-                  method = "rf",
-		                metric = "ROC",
-		                trControl = ctrl)
-
-
-set.seed(1404)
-smote_outside <- train(treatment_best_response ~ ., data = smote_train, 
-                method = "rf",
-		                metric = "ROC",
-		                trControl = ctrl)
-
-outside_models <- list(original = orig_fit,
-                       down = down_outside,
-                       up = up_outside,
-                       SMOTE = smote_outside,
-                       ROSE = rose_outside)
-
-outside_resampling <- resamples(outside_models)
-
-test_roc <- function(model, data) {
-  library(pROC)
-  roc_obj <- roc(data$treatment_best_response, 
-                 predict(model, data, type = "prob")[, "noresponse"],
-                 levels = c("response", "noresponse"))
-  ci(roc_obj)
-  }
-
-outside_test <- lapply(outside_models, test_roc, data = imbal_test)
-outside_test <- lapply(outside_test, as.vector)
-outside_test <- do.call("rbind", outside_test)
-colnames(outside_test) <- c("lower", "ROC", "upper")
-outside_test <- as.data.frame(outside_test)
-
-summary(outside_resampling, metric = "ROC")
-
-outside_test
-
-table$rf <- outside_test$ROC
-
+allmodels <- rbind(allmodels,data.frame(model=models_test$rn,sens_ts=models_test$V1,spec_ts=models_test$V2,sens_tr=models_test$V3,spec_tr=models_test$V4))
 
 #-----------------------------------
 
-
-set.seed(1404)
-orig_fit <- train(treatment_best_response ~ ., data = imbal_train, 
+models <- list()
+fun <- function(x) {
+  set.seed(1404)
+  model <- train(treatment_best_response ~ ., data = get(x), 
                method = "svmLinear", 
-			 			trControl = ctrl)
-set.seed(1404)
-down_outside <- train(Class ~ ., data = down_train, 
-              method = "svmLinear", 
-			 			trControl = ctrl)
+            trControl = ctrl)
+  model <- list(model)
+  names(model) <- x
+  models <<- c(models,model)
+}
+lapply(sampling,fun)
+models_test <- lapply(models, test_acc)
+models_test <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acc), as.vector)))
+models_testt <- lapply(models, test_acct)
+models_testt <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acct), as.vector)))
+colnames(models_testt) <- c("V3","V4")
+setDT(models_test, keep.rownames = TRUE)[]
+setDT(models_testt, keep.rownames = TRUE)[]
+models_test <- merge(models_test,models_testt,by.x="rn",by.y="rn")
+models_test$rn <- paste('svml_',models_test$rn,sep='') 
 
-set.seed(1404)
-up_outside <- train(Class ~ ., data = up_train, 
-             method = "svmLinear", 
-			 			trControl = ctrl)
+allmodels <- rbind(allmodels,data.frame(model=models_test$rn,sens_ts=models_test$V1,spec_ts=models_test$V2,sens_tr=models_test$V3,spec_tr=models_test$V4))
+#------------------------------------------------------------------------
 
-set.seed(1404)
-rose_outside <- train(treatment_best_response ~ ., data = rose_train, 
-                  method = "svmLinear", 
-			 			trControl = ctrl)
+models <- list()
+fun <- function(x) {
+  set.seed(1404)
+  model <- train(treatment_best_response ~ ., data = get(x), 
+               method = "glm")
+  model <- list(model)
+  names(model) <- x
+  models <<- c(models,model)
+}
+lapply(sampling,fun)
+models_test <- lapply(models, test_acc)
+models_test <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acc), as.vector)))
+models_testt <- lapply(models, test_acct)
+models_testt <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acct), as.vector)))
+colnames(models_testt) <- c("V3","V4")
+setDT(models_test, keep.rownames = TRUE)[]
+setDT(models_testt, keep.rownames = TRUE)[]
+models_test <- merge(models_test,models_testt,by.x="rn",by.y="rn")
+models_test$rn <- paste('glm_',models_test$rn,sep='') 
+
+allmodels <- rbind(allmodels,data.frame(model=models_test$rn,sens_ts=models_test$V1,spec_ts=models_test$V2,sens_tr=models_test$V3,spec_tr=models_test$V4))
+#------------------------------------------------------------------------
+
+models <- list()
+fun <- function(x) {
+  set.seed(1404)
+  model <- train(treatment_best_response ~ ., data = get(x), 
+               method = "rocc")
+  model <- list(model)
+  names(model) <- x
+  models <<- c(models,model)
+}
+lapply(sampling,fun)
+models_test <- lapply(models, test_acc)
+models_test <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acc), as.vector)))
+models_testt <- lapply(models, test_acct)
+models_testt <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acct), as.vector)))
+colnames(models_testt) <- c("V3","V4")
+setDT(models_test, keep.rownames = TRUE)[]
+setDT(models_testt, keep.rownames = TRUE)[]
+models_test <- merge(models_test,models_testt,by.x="rn",by.y="rn")
+models_test$rn <- paste('rocc_',models_test$rn,sep='') 
+
+allmodels <- rbind(allmodels,data.frame(model=models_test$rn,sens_ts=models_test$V1,spec_ts=models_test$V2,sens_tr=models_test$V3,spec_tr=models_test$V4))
+#------------------------------------------------------------------------
+
+models <- list()
+fun <- function(x) {
+  set.seed(1404)
+  model <- train(treatment_best_response ~ ., data = get(x), 
+               method = "ranger")
+  model <- list(model)
+  names(model) <- x
+  models <<- c(models,model)
+}
+lapply(sampling,fun)
+models_test <- lapply(models, test_acc)
+models_test <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acc), as.vector)))
+models_testt <- lapply(models, test_acct)
+models_testt <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acct), as.vector)))
+colnames(models_testt) <- c("V3","V4")
+setDT(models_test, keep.rownames = TRUE)[]
+setDT(models_testt, keep.rownames = TRUE)[]
+models_test <- merge(models_test,models_testt,by.x="rn",by.y="rn")
+models_test$rn <- paste('ranger_',models_test$rn,sep='') 
+
+allmodels <- rbind(allmodels,data.frame(model=models_test$rn,sens_ts=models_test$V1,spec_ts=models_test$V2,sens_tr=models_test$V3,spec_tr=models_test$V4))
+#------------------------------------------------------------------------
+models <- list()
+fun <- function(x) {
+  set.seed(1404)
+  model <- train(treatment_best_response ~ ., data = get(x), 
+               method = "nnet")
+  model <- list(model)
+  names(model) <- x
+  models <<- c(models,model)
+}
+lapply(sampling,fun)
+models_test <- lapply(models, test_acc)
+models_test <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acc), as.vector)))
+models_testt <- lapply(models, test_acct)
+models_testt <- as.data.frame(do.call("rbind", lapply(lapply(models, test_acct), as.vector)))
+colnames(models_testt) <- c("V3","V4")
+setDT(models_test, keep.rownames = TRUE)[]
+setDT(models_testt, keep.rownames = TRUE)[]
+models_test <- merge(models_test,models_testt,by.x="rn",by.y="rn")
+models_test$rn <- paste('nnet_',models_test$rn,sep='') 
+
+allmodels <- rbind(allmodels,data.frame(model=models_test$rn,sens_ts=models_test$V1,spec_ts=models_test$V2,sens_tr=models_test$V3,spec_tr=models_test$V4))
+allmodels
 
 
-set.seed(1404)
-smote_outside <- train(treatment_best_response ~ ., data = smote_train, 
-                method = "svmLinear", 
-			 			trControl = ctrl)
-
-outside_models <- list(original = orig_fit,
-                       down = down_outside,
-                       up = up_outside,
-                       SMOTE = smote_outside,
-                       ROSE = rose_outside)
-
-outside_resampling <- resamples(outside_models)
-
-test_roc <- function(model, data) {
-  library(pROC)
-  roc_obj <- roc(data$treatment_best_response, 
-                 predict(model, data, type = "prob")[, "noresponse"],
-                 levels = c("response", "noresponse"))
-  ci(roc_obj)
-  }
-
-outside_test <- lapply(outside_models, test_roc, data = imbal_test)
-outside_test <- lapply(outside_test, as.vector)
-outside_test <- do.call("rbind", outside_test)
-colnames(outside_test) <- c("lower", "ROC", "upper")
-outside_test <- as.data.frame(outside_test)
-
-summary(outside_resampling, metric = "ROC")
-
-outside_test
-
-table$svmlinear <- outside_test$ROC
-
-# see result
-
-table
-
-
+#
 
 # plot heatmap
 
@@ -751,7 +709,7 @@ dev.off()
 
 
 
-#PCA ---------------------------------------------------0
+#PCA ---------------------------------------------------
 
 # create data matrix
 
