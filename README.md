@@ -7,3 +7,6 @@
 
 ### Note
 Will clean and sum up the code soon!
+
+Best
+JK
