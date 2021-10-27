@@ -677,9 +677,48 @@ allmodels <- rbind(allmodels,data.frame(model=models_test$rn,sens_ts=models_test
 allmodels
 
 
-#
+# 2nd approach using e2071 after realized that linearSVM is bombbbbbb -----------------------------------------
 
-# plot heatmap
+
+geneList <- c('ISL1','CPS1','COL19A1','LAMB4','CHGA','NECAB2','CTCFL','MAGEA10','SYT5','GDPD2','H19','MYCN','SCN2A','COL2A1','NTRK2','PLAAT5','SYT9','LGALS4','CALB2','OXTR','RPL10P6','ERVH48-1','LERFS','RTL9','LINC00942','KCNJ18')
+orimat <- imbal_train[,colnames(imbal_train)%in% geneList]
+library("e1071")
+
+X <- as.matrix(orimat[,-ncol(orimat)])
+m <- svm(treatment_best_response~., data=orimat, kernel="linear", scale=T,cost='60')
+w <- t(m$coefs) %*% X[m$index,]
+
+coef <- t(as.matrix( as.data.frame(coef(m))))
+for(column in 1:ncol(sca)){
+  coef[, column+1] <- coef[, column+1]/sca[column]
+}
+
+p3 <- X %*% coef[,-1] - coef[1]
+p3 <- X %*% coef[,-1] -1.651135
+p3 <- X %*% coef[,-1]          # <<<<<<< why is it not transposed
+
+coe <- as.matrix(coef[,-1])
+p3 <- X %*% coe
+
+cen <- t(as.matrix( as.data.frame(m$x.scale[1])))
+# cenmat  <- matrix(, nrow = nrow(imbal_train), ncol = ncol(imbal_train)-1)
+# for(column in 1:ncol(cenmat)){
+#   cenmat[, column] <- cen[column]
+# }
+
+sca <- t(as.matrix( as.data.frame(m$x.scale[2])))
+
+p2 <- predict(m, newdata=imbal_train, decision.values=T)
+p1 <- predict(m, newdata=imbal_train, decision.values=F)
+p2 <- attr(p2, "decision.values")
+# p2 <- X %*% t(w)
+p3 <- X %*% t(w) - m$rho
+p4 <- X %*% godw - m$rho
+p5 <- X 
+godp <- data.frame(pred=p1,dec=p2,mod=p3)
+
+
+# plot heatmap --------------------------------------
 
 df <- table
 # rownames(df)<- df[,1]
